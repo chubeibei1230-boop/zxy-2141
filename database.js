@@ -141,6 +141,61 @@ function initDatabase() {
       FOREIGN KEY (user_id) REFERENCES users(id)
     );
 
+    CREATE TABLE IF NOT EXISTS application_materials (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      application_id INTEGER NOT NULL,
+      material_name TEXT NOT NULL,
+      material_type TEXT NOT NULL DEFAULT 'other',
+      description TEXT,
+      attachment_url TEXT,
+      voucher_url TEXT,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'submitted', 'returned', 'supplemented', 'approved')),
+      sort_order INTEGER DEFAULT 0,
+      version INTEGER DEFAULT 1,
+      created_by INTEGER NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (application_id) REFERENCES purchase_applications(id) ON DELETE CASCADE,
+      FOREIGN KEY (created_by) REFERENCES users(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS material_change_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      material_id INTEGER NOT NULL,
+      application_id INTEGER NOT NULL,
+      user_id INTEGER NOT NULL,
+      change_type TEXT NOT NULL CHECK (change_type IN ('create', 'update', 'delete', 'supplement', 'submit', 'approve', 'return')),
+      field_changed TEXT,
+      old_value TEXT,
+      new_value TEXT,
+      change_reason TEXT,
+      version INTEGER DEFAULT 1,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (material_id) REFERENCES application_materials(id) ON DELETE CASCADE,
+      FOREIGN KEY (application_id) REFERENCES purchase_applications(id) ON DELETE CASCADE,
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS return_material_requirements (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      application_id INTEGER NOT NULL,
+      material_id INTEGER,
+      return_log_id INTEGER,
+      auditor_id INTEGER NOT NULL,
+      requirement_type TEXT NOT NULL DEFAULT 'supplement' CHECK (requirement_type IN ('supplement', 'modify', 'delete', 'replace')),
+      required_material_name TEXT,
+      required_material_type TEXT,
+      description TEXT NOT NULL,
+      is_completed INTEGER DEFAULT 0,
+      completed_at DATETIME,
+      completed_by INTEGER,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (application_id) REFERENCES purchase_applications(id) ON DELETE CASCADE,
+      FOREIGN KEY (material_id) REFERENCES application_materials(id) ON DELETE SET NULL,
+      FOREIGN KEY (auditor_id) REFERENCES users(id),
+      FOREIGN KEY (completed_by) REFERENCES users(id)
+    );
+
     CREATE INDEX IF NOT EXISTS idx_applications_status ON purchase_applications(status);
     CREATE INDEX IF NOT EXISTS idx_applications_applicant ON purchase_applications(applicant_id);
     CREATE INDEX IF NOT EXISTS idx_applications_department ON purchase_applications(department_id);
@@ -148,6 +203,13 @@ function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_applications_auditor ON purchase_applications(current_auditor_id);
     CREATE INDEX IF NOT EXISTS idx_nodes_application ON approval_nodes(application_id);
     CREATE INDEX IF NOT EXISTS idx_logs_application ON operation_logs(application_id);
+    CREATE INDEX IF NOT EXISTS idx_materials_application ON application_materials(application_id);
+    CREATE INDEX IF NOT EXISTS idx_materials_status ON application_materials(status);
+    CREATE INDEX IF NOT EXISTS idx_material_changes_material ON material_change_logs(material_id);
+    CREATE INDEX IF NOT EXISTS idx_material_changes_application ON material_change_logs(application_id);
+    CREATE INDEX IF NOT EXISTS idx_return_req_application ON return_material_requirements(application_id);
+    CREATE INDEX IF NOT EXISTS idx_return_req_material ON return_material_requirements(material_id);
+    CREATE INDEX IF NOT EXISTS idx_return_req_completed ON return_material_requirements(is_completed);
   `);
 
   seedInitialData();

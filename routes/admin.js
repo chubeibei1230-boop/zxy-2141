@@ -474,4 +474,177 @@ router.get('/auditors', (req, res) => {
   }
 });
 
+const {
+  getMaterialsByApplication,
+  getMaterialChangeLogs,
+  getAllMaterialChangeLogs,
+  getReturnMaterialRequirements,
+  getMaterialTypeDict,
+  getMaterialStatusDict,
+  getRequirementTypeDict
+} = require('../services/approvalEngine');
+
+router.get('/applications/:id/materials', (req, res) => {
+  try {
+    const { id } = req.params;
+    const app = db.prepare('SELECT id FROM purchase_applications WHERE id = ?').get(id);
+    if (!app) {
+      return res.status(404).json({ success: false, message: '采购申请不存在' });
+    }
+
+    const materials = getMaterialsByApplication(id);
+    const statusDict = getMaterialStatusDict();
+    const typeDict = getMaterialTypeDict();
+    const statusMap = {};
+    const typeMap = {};
+    statusDict.forEach(s => statusMap[s.value] = s.label);
+    typeDict.forEach(t => typeMap[t.value] = t.label);
+
+    const materialsWithLabels = materials.map(m => ({
+      ...m,
+      material_type_name: typeMap[m.material_type] || m.material_type,
+      status_name: statusMap[m.status] || m.status
+    }));
+
+    res.json({ success: true, data: materialsWithLabels });
+  } catch (err) {
+    console.error('管理员查询材料清单错误:', err);
+    res.status(500).json({ success: false, message: '查询材料清单失败：' + err.message });
+  }
+});
+
+router.get('/materials/:materialId/changes', (req, res) => {
+  try {
+    const { materialId } = req.params;
+    const material = db.prepare('SELECT id FROM application_materials WHERE id = ?').get(materialId);
+    if (!material) {
+      return res.status(404).json({ success: false, message: '材料不存在' });
+    }
+    const logs = getMaterialChangeLogs(parseInt(materialId));
+    res.json({ success: true, data: logs });
+  } catch (err) {
+    console.error('查询材料变更记录错误:', err);
+    res.status(500).json({ success: false, message: '查询失败：' + err.message });
+  }
+});
+
+router.get('/applications/:id/material-change-logs', (req, res) => {
+  try {
+    const { id } = req.params;
+    const app = db.prepare('SELECT id FROM purchase_applications WHERE id = ?').get(id);
+    if (!app) {
+      return res.status(404).json({ success: false, message: '采购申请不存在' });
+    }
+    const logs = getAllMaterialChangeLogs(id);
+    res.json({ success: true, data: logs });
+  } catch (err) {
+    console.error('查询材料变更记录错误:', err);
+    res.status(500).json({ success: false, message: '查询失败：' + err.message });
+  }
+});
+
+router.get('/applications/:id/return-requirements', (req, res) => {
+  try {
+    const { id } = req.params;
+    const app = db.prepare('SELECT id FROM purchase_applications WHERE id = ?').get(id);
+    if (!app) {
+      return res.status(404).json({ success: false, message: '采购申请不存在' });
+    }
+    const requirements = getReturnMaterialRequirements(id);
+    const reqTypeMap = {
+      supplement: '补充材料',
+      modify: '修改材料',
+      delete: '删除材料',
+      replace: '替换材料'
+    };
+    const data = requirements.map(r => ({
+      ...r,
+      requirement_type_name: reqTypeMap[r.requirement_type] || r.requirement_type
+    }));
+    res.json({ success: true, data });
+  } catch (err) {
+    console.error('查询退回材料要求错误:', err);
+    res.status(500).json({ success: false, message: '查询失败：' + err.message });
+  }
+});
+
+router.get('/material-types', (req, res) => {
+  res.json({ success: true, data: getMaterialTypeDict() });
+});
+
+router.get('/material-statuses', (req, res) => {
+  res.json({ success: true, data: getMaterialStatusDict() });
+});
+
+router.get('/requirement-types', (req, res) => {
+  res.json({ success: true, data: getRequirementTypeDict() });
+});
+
+router.get('/material-stats', (req, res) => {
+  try {
+    const { date_from, date_to } = req.query;
+
+    let whereSql = 'WHERE 1=1';
+    const params = [];
+    if (date_from) {
+      whereSql += ' AND DATE(am.created_at) >= DATE(?)';
+      params.push(date_from);
+    }
+    if (date_to) {
+      whereSql += ' AND DATE(am.created_at) <= DATE(?)';
+      params.push(date_to);
+    }
+
+    const byTypeSql = `
+      SELECT am.material_type, COUNT(*) as count,
+             COUNT(DISTINCT am.application_id) as application_count
+      FROM application_materials am
+      ${whereSql}
+      GROUP BY am.material_type
+      ORDER BY count DESC
+    `;
+    const byType = db.prepare(byTypeSql).all(...params);
+
+    const byStatusSql = `
+      SELECT am.status, COUNT(*) as count,
+             COUNT(DISTINCT am.application_id) as application_count
+      FROM application_materials am
+      ${whereSql}
+      GROUP BY am.status
+      ORDER BY count DESC
+    `;
+    const byStatus = db.prepare(byStatusSql).all(...params);
+
+    const totalMaterials = byType.reduce((s, i) => s + i.count, 0);
+    const totalWithMaterials = db.prepare(`
+      SELECT COUNT(DISTINCT application_id) as count FROM application_materials am
+      ${whereSql}
+    `).get(...params).count;
+
+    const reqStatusSql = `
+      SELECT is_completed, COUNT(*) as count
+      FROM return_material_requirements rmr
+      ${whereSql.replace('am.', 'rmr.')}
+      GROUP BY is_completed
+    `;
+    const reqStatus = db.prepare(reqStatusSql).all(...params);
+
+    res.json({
+      success: true,
+      data: {
+        summary: {
+          total_materials: totalMaterials,
+          total_applications_with_materials: totalWithMaterials
+        },
+        by_type: byType,
+        by_status: byStatus,
+        return_requirements_status: reqStatus
+      }
+    });
+  } catch (err) {
+    console.error('材料统计错误:', err);
+    res.status(500).json({ success: false, message: '查询材料统计失败：' + err.message });
+  }
+});
+
 module.exports = router;

@@ -64,23 +64,45 @@ app.get('/api', (req, res) => {
         delete_application: 'DELETE /api/operator/applications/:id',
         submit_application: 'POST /api/operator/applications/:id/submit',
         update_quote: 'PUT /api/operator/applications/:id/quote',
-        confirm_arrival: 'POST /api/operator/applications/:id/arrival'
+        confirm_arrival: 'POST /api/operator/applications/:id/arrival',
+        list_materials: 'GET /api/operator/applications/:id/materials',
+        add_material: 'POST /api/operator/applications/:id/materials',
+        update_material: 'PUT /api/operator/materials/:materialId',
+        delete_material: 'DELETE /api/operator/materials/:materialId',
+        material_changes: 'GET /api/operator/materials/:materialId/changes',
+        return_requirements: 'GET /api/operator/applications/:id/return-requirements',
+        material_types: 'GET /api/operator/material-types',
+        material_statuses: 'GET /api/operator/material-statuses'
       },
       auditor: {
         approve: 'POST /api/auditor/applications/:id/approve',
-        return: 'POST /api/auditor/applications/:id/return',
+        return: 'POST /api/auditor/applications/:id/return (支持material_requirements参数)',
         transfer: 'POST /api/auditor/applications/:id/transfer',
-        close: 'POST /api/auditor/applications/:id/close'
+        close: 'POST /api/auditor/applications/:id/close',
+        list_materials: 'GET /api/auditor/applications/:id/materials',
+        material_changes: 'GET /api/auditor/materials/:materialId/changes',
+        all_material_changes: 'GET /api/auditor/applications/:id/material-change-logs',
+        return_requirements: 'GET /api/auditor/applications/:id/return-requirements',
+        material_types: 'GET /api/auditor/material-types',
+        material_statuses: 'GET /api/auditor/material-statuses',
+        requirement_types: 'GET /api/auditor/requirement-types'
       },
       query: {
         list: 'GET /api/query/applications',
-        detail: 'GET /api/query/applications/:id',
+        detail: 'GET /api/query/applications/:id (含材料清单、变更记录、退回要求)',
         logs: 'GET /api/query/applications/:id/logs',
         nodes: 'GET /api/query/applications/:id/nodes',
+        materials: 'GET /api/query/applications/:id/materials',
+        material_change_logs: 'GET /api/query/applications/:id/material-change-logs',
+        material_changes: 'GET /api/query/materials/:materialId/changes',
+        return_requirements: 'GET /api/query/applications/:id/return-requirements',
         public_budget_subjects: 'GET /api/query/public/budget-subjects',
         public_suppliers: 'GET /api/query/public/suppliers',
         public_departments: 'GET /api/query/public/departments',
-        match_rule: 'GET /api/query/public/approval-rules/match'
+        match_rule: 'GET /api/query/public/approval-rules/match',
+        public_material_types: 'GET /api/query/public/material-types',
+        public_material_statuses: 'GET /api/query/public/material-statuses',
+        public_requirement_types: 'GET /api/query/public/requirement-types'
       },
       stats: {
         my_pending: 'GET /api/stats/my-pending',

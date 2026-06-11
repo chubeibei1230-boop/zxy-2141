@@ -6,7 +6,14 @@ const {
   returnApplication,
   transferApplication,
   closeApplication,
-  getAllNodesWithAuditors
+  getAllNodesWithAuditors,
+  getMaterialsByApplication,
+  getMaterialChangeLogs,
+  getReturnMaterialRequirements,
+  getAllMaterialChangeLogs,
+  getMaterialTypeDict,
+  getMaterialStatusDict,
+  getRequirementTypeDict
 } = require('../services/approvalEngine');
 
 const router = express.Router();
@@ -55,9 +62,9 @@ router.post('/applications/:id/return', (req, res) => {
   try {
     const { id } = req.params;
     const userId = req.user.id;
-    const { comment } = req.body;
+    const { comment, material_requirements } = req.body;
 
-    returnApplication(id, userId, comment);
+    returnApplication(id, userId, comment, material_requirements);
 
     const app = db.prepare(`
       SELECT pa.*,
@@ -162,6 +169,110 @@ router.post('/applications/:id/close', (req, res) => {
     console.error('关闭错误:', err);
     res.status(400).json({ success: false, message: err.message });
   }
+});
+
+router.get('/applications/:id/materials', (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const app = db.prepare('SELECT id FROM purchase_applications WHERE id = ?').get(id);
+    if (!app) {
+      return res.status(404).json({ success: false, message: '采购申请不存在' });
+    }
+
+    const materials = getMaterialsByApplication(id);
+    const statusDict = getMaterialStatusDict();
+    const typeDict = getMaterialTypeDict();
+    const statusMap = {};
+    const typeMap = {};
+    statusDict.forEach(s => statusMap[s.value] = s.label);
+    typeDict.forEach(t => typeMap[t.value] = t.label);
+
+    const materialsWithLabels = materials.map(m => ({
+      ...m,
+      material_type_name: typeMap[m.material_type] || m.material_type,
+      status_name: statusMap[m.status] || m.status
+    }));
+
+    res.json({ success: true, data: materialsWithLabels });
+  } catch (err) {
+    console.error('审核人查询材料清单错误:', err);
+    res.status(500).json({ success: false, message: '查询材料清单失败：' + err.message });
+  }
+});
+
+router.get('/materials/:materialId/changes', (req, res) => {
+  try {
+    const { materialId } = req.params;
+
+    const material = db.prepare('SELECT * FROM application_materials WHERE id = ?').get(materialId);
+    if (!material) {
+      return res.status(404).json({ success: false, message: '材料不存在' });
+    }
+
+    const logs = getMaterialChangeLogs(parseInt(materialId));
+    res.json({ success: true, data: logs });
+  } catch (err) {
+    console.error('查询材料变更记录错误:', err);
+    res.status(500).json({ success: false, message: '查询失败：' + err.message });
+  }
+});
+
+router.get('/applications/:id/material-change-logs', (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const app = db.prepare('SELECT id FROM purchase_applications WHERE id = ?').get(id);
+    if (!app) {
+      return res.status(404).json({ success: false, message: '采购申请不存在' });
+    }
+
+    const logs = getAllMaterialChangeLogs(id);
+    res.json({ success: true, data: logs });
+  } catch (err) {
+    console.error('查询材料变更记录错误:', err);
+    res.status(500).json({ success: false, message: '查询失败：' + err.message });
+  }
+});
+
+router.get('/applications/:id/return-requirements', (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const app = db.prepare('SELECT id FROM purchase_applications WHERE id = ?').get(id);
+    if (!app) {
+      return res.status(404).json({ success: false, message: '采购申请不存在' });
+    }
+
+    const requirements = getReturnMaterialRequirements(id);
+    const reqTypeMap = {
+      supplement: '补充材料',
+      modify: '修改材料',
+      delete: '删除材料',
+      replace: '替换材料'
+    };
+    const data = requirements.map(r => ({
+      ...r,
+      requirement_type_name: reqTypeMap[r.requirement_type] || r.requirement_type
+    }));
+
+    res.json({ success: true, data });
+  } catch (err) {
+    console.error('查询退回材料要求错误:', err);
+    res.status(500).json({ success: false, message: '查询失败：' + err.message });
+  }
+});
+
+router.get('/material-types', (req, res) => {
+  res.json({ success: true, data: getMaterialTypeDict() });
+});
+
+router.get('/material-statuses', (req, res) => {
+  res.json({ success: true, data: getMaterialStatusDict() });
+});
+
+router.get('/requirement-types', (req, res) => {
+  res.json({ success: true, data: getRequirementTypeDict() });
 });
 
 module.exports = router;

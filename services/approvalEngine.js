@@ -114,7 +114,16 @@ function submitApplication(applicationId, userId) {
       WHERE id = ?
     `).run(firstAuditorId, rule.id, applicationId);
 
-    logOperation(applicationId, userId, '提交申请', 'submit', oldStatus, 'pending_approval', `提交申请，按规则【${rule.name}】进入审批流程`);
+    updateMaterialStatusOnSubmit(applicationId);
+
+    if (oldStatus === 'returned') {
+      markReturnRequirementsAsCompleted(applicationId, userId);
+    }
+
+    logOperation(applicationId, userId, '提交申请', 'submit', oldStatus, 'pending_approval',
+      oldStatus === 'returned'
+        ? `重新提交申请（已补充材料），按规则【${rule.name}】进入审批流程`
+        : `提交申请，按规则【${rule.name}】进入审批流程`);
   });
 
   tx();
@@ -156,6 +165,7 @@ function approveApplication(applicationId, userId, comment) {
         WHERE id = ?
       `).run(totalLevels, applicationId);
 
+      updateMaterialStatusOnApprove(applicationId);
       logOperation(applicationId, userId, `第${currentIndex + 1}级审核`, 'approve', 'pending_approval', 'approved', comment || '全部审批通过');
     } else {
       const nextNodesSameLevel = nodes.filter(n => n.node_index === nextIndex);
@@ -176,7 +186,7 @@ function approveApplication(applicationId, userId, comment) {
   return { success: true };
 }
 
-function returnApplication(applicationId, userId, comment) {
+function returnApplication(applicationId, userId, comment, materialRequirements) {
   const app = db.prepare('SELECT * FROM purchase_applications WHERE id = ?').get(applicationId);
   if (!app) throw new Error('采购申请不存在');
   if (app.status === 'closed') throw new Error('申请已关闭，无法退回');
@@ -209,10 +219,16 @@ function returnApplication(applicationId, userId, comment) {
       WHERE id = ?
     `).run(applicationId);
 
+    updateMaterialStatusOnReturn(applicationId);
     logOperation(applicationId, userId, `第${currentIndex + 1}级审核`, 'return', 'pending_approval', 'returned', comment);
   });
 
   tx();
+
+  if (materialRequirements && Array.isArray(materialRequirements) && materialRequirements.length > 0) {
+    addReturnMaterialRequirements(applicationId, userId, materialRequirements, comment);
+  }
+
   return { success: true };
 }
 
@@ -384,6 +400,338 @@ function updateQuoteDescription(applicationId, userId, quoteDescription) {
   return { success: true };
 }
 
+function logMaterialChange(materialId, applicationId, userId, changeType, fieldChanged, oldValue, newValue, changeReason, version) {
+  db.prepare(`
+    INSERT INTO material_change_logs
+    (material_id, application_id, user_id, change_type, field_changed, old_value, new_value, change_reason, version)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(materialId, applicationId, userId, changeType, fieldChanged || null, oldValue || null, newValue || null, changeReason || null, version || 1);
+}
+
+function addMaterial(applicationId, userId, materialData) {
+  const app = db.prepare('SELECT * FROM purchase_applications WHERE id = ?').get(applicationId);
+  if (!app) throw new Error('采购申请不存在');
+
+  if (app.status === 'closed' || app.status === 'arrival_confirmed' || app.status === 'approved') {
+    throw new Error('当前状态不允许维护材料信息');
+  }
+
+  if (app.status === 'pending_approval') {
+    throw new Error('申请正在审批中，无法维护材料，请先联系审核人退回');
+  }
+
+  if (app.applicant_id !== userId) {
+    throw new Error('只有申请人本人可以维护材料信息');
+  }
+
+  const { material_name, material_type = 'other', description, attachment_url, voucher_url, sort_order = 0 } = materialData;
+
+  if (!material_name || material_name.trim() === '') {
+    throw new Error('材料名称不能为空');
+  }
+
+  const validTypes = ['contract', 'quote', 'invoice', 'receipt', 'certificate', 'approval', 'specification', 'drawing', 'other'];
+  if (!validTypes.includes(material_type)) {
+    throw new Error(`材料类型只能是以下之一：${validTypes.join('、')}`);
+  }
+
+  let materialId;
+  const tx = db.transaction(() => {
+    const result = db.prepare(`
+      INSERT INTO application_materials
+      (application_id, material_name, material_type, description, attachment_url, voucher_url, status, sort_order, version, created_by)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+    `).run(applicationId, material_name, material_type, description || null, attachment_url || null, voucher_url || null,
+      app.status === 'returned' ? 'supplemented' : 'pending', sort_order, userId);
+
+    materialId = result.lastInsertRowid;
+
+    logMaterialChange(materialId, applicationId, userId, 'create', null, null, JSON.stringify(materialData), '新增材料', 1);
+    logOperation(applicationId, userId, '材料管理', 'material_add', app.status, app.status, `新增材料：${material_name}`);
+  });
+
+  tx();
+  return db.prepare('SELECT * FROM application_materials WHERE id = ?').get(materialId);
+}
+
+function updateMaterial(materialId, userId, materialData) {
+  const material = db.prepare('SELECT * FROM application_materials WHERE id = ?').get(materialId);
+  if (!material) throw new Error('材料不存在');
+
+  const app = db.prepare('SELECT * FROM purchase_applications WHERE id = ?').get(material.application_id);
+  if (!app) throw new Error('采购申请不存在');
+
+  if (app.status === 'closed' || app.status === 'arrival_confirmed' || app.status === 'approved') {
+    throw new Error('当前状态不允许修改材料信息');
+  }
+
+  if (app.status === 'pending_approval') {
+    throw new Error('申请正在审批中，无法修改材料，请先联系审核人退回');
+  }
+
+  if (material.created_by !== userId) {
+    throw new Error('只有材料创建人可以修改材料信息');
+  }
+
+  const validTypes = ['contract', 'quote', 'invoice', 'receipt', 'certificate', 'approval', 'specification', 'drawing', 'other'];
+  if (materialData.material_type && !validTypes.includes(materialData.material_type)) {
+    throw new Error(`材料类型只能是以下之一：${validTypes.join('、')}`);
+  }
+
+  const updates = [];
+  const values = [];
+  const changeDetails = [];
+
+  const fields = [
+    { key: 'material_name', label: '材料名称' },
+    { key: 'material_type', label: '材料类型' },
+    { key: 'description', label: '材料说明' },
+    { key: 'attachment_url', label: '附件地址' },
+    { key: 'voucher_url', label: '凭证链接' },
+    { key: 'sort_order', label: '排序' }
+  ];
+
+  fields.forEach(({ key, label }) => {
+    if (materialData[key] !== undefined) {
+      const oldVal = material[key];
+      const newVal = materialData[key];
+      if (JSON.stringify(oldVal) !== JSON.stringify(newVal)) {
+        updates.push(`${key} = ?`);
+        values.push(newVal);
+        logMaterialChange(materialId, material.application_id, userId, 'update', label,
+          oldVal !== null && typeof oldVal !== 'undefined' ? String(oldVal) : null,
+          newVal !== null && typeof newVal !== 'undefined' ? String(newVal) : null,
+          `修改${label}`, material.version);
+        changeDetails.push(`${label}: ${oldVal ?? '(空)'} → ${newVal ?? '(空)'}`);
+      }
+    }
+  });
+
+  if (updates.length === 0) {
+    return material;
+  }
+
+  const newVersion = material.version + 1;
+  updates.push('version = ?');
+  values.push(newVersion);
+  updates.push('status = ?');
+  values.push(app.status === 'returned' ? 'supplemented' : 'pending');
+  updates.push('updated_at = CURRENT_TIMESTAMP');
+  values.push(materialId);
+
+  const tx = db.transaction(() => {
+    db.prepare(`UPDATE application_materials SET ${updates.join(', ')} WHERE id = ?`).run(...values);
+    logOperation(material.application_id, userId, '材料管理', 'material_update', app.status, app.status,
+      `修改材料【${material.material_name}】：${changeDetails.join('；')}`);
+  });
+
+  tx();
+  return db.prepare('SELECT * FROM application_materials WHERE id = ?').get(materialId);
+}
+
+function deleteMaterial(materialId, userId) {
+  const material = db.prepare('SELECT * FROM application_materials WHERE id = ?').get(materialId);
+  if (!material) throw new Error('材料不存在');
+
+  const app = db.prepare('SELECT * FROM purchase_applications WHERE id = ?').get(material.application_id);
+  if (!app) throw new Error('采购申请不存在');
+
+  if (app.status === 'closed' || app.status === 'arrival_confirmed' || app.status === 'approved') {
+    throw new Error('当前状态不允许删除材料');
+  }
+
+  if (app.status === 'pending_approval') {
+    throw new Error('申请正在审批中，无法删除材料，请先联系审核人退回');
+  }
+
+  if (material.created_by !== userId) {
+    throw new Error('只有材料创建人可以删除材料');
+  }
+
+  const tx = db.transaction(() => {
+    logMaterialChange(materialId, material.application_id, userId, 'delete', null, JSON.stringify(material), null, '删除材料', material.version);
+    db.prepare('DELETE FROM application_materials WHERE id = ?').run(materialId);
+    logOperation(material.application_id, userId, '材料管理', 'material_delete', app.status, app.status,
+      `删除材料：${material.material_name}`);
+  });
+
+  tx();
+  return { success: true };
+}
+
+function getMaterialsByApplication(applicationId) {
+  const materials = db.prepare(`
+    SELECT am.*, u.real_name as creator_name, u.username as creator_username
+    FROM application_materials am
+    LEFT JOIN users u ON am.created_by = u.id
+    WHERE am.application_id = ?
+    ORDER BY am.sort_order, am.id
+  `).all(applicationId);
+  return materials;
+}
+
+function getMaterialChangeLogs(materialId) {
+  const logs = db.prepare(`
+    SELECT mcl.*, u.real_name as user_name, u.username as user_username
+    FROM material_change_logs mcl
+    LEFT JOIN users u ON mcl.user_id = u.id
+    WHERE mcl.material_id = ?
+    ORDER BY mcl.created_at ASC, mcl.id ASC
+  `).all(materialId);
+  return logs;
+}
+
+function getAllMaterialChangeLogs(applicationId) {
+  const logs = db.prepare(`
+    SELECT mcl.*, u.real_name as user_name, u.username as user_username,
+           am.material_name
+    FROM material_change_logs mcl
+    LEFT JOIN users u ON mcl.user_id = u.id
+    LEFT JOIN application_materials am ON mcl.material_id = am.id
+    WHERE mcl.application_id = ?
+    ORDER BY mcl.created_at ASC, mcl.id ASC
+  `).all(applicationId);
+  return logs;
+}
+
+function addReturnMaterialRequirements(applicationId, auditorId, requirements, returnComment) {
+  const app = db.prepare('SELECT * FROM purchase_applications WHERE id = ?').get(applicationId);
+  if (!app) throw new Error('采购申请不存在');
+
+  if (!requirements || !Array.isArray(requirements) || requirements.length === 0) {
+    return [];
+  }
+
+  const validReqTypes = ['supplement', 'modify', 'delete', 'replace'];
+
+  const tx = db.transaction(() => {
+    const insertReq = db.prepare(`
+      INSERT INTO return_material_requirements
+      (application_id, material_id, auditor_id, requirement_type, required_material_name, required_material_type, description)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    requirements.forEach(req => {
+      if (!req.description || req.description.trim() === '') {
+        throw new Error('材料补充要求描述不能为空');
+      }
+      const reqType = req.requirement_type || 'supplement';
+      if (!validReqTypes.includes(reqType)) {
+        throw new Error(`要求类型只能是以下之一：${validReqTypes.join('、')}`);
+      }
+      insertReq.run(
+        applicationId,
+        req.material_id || null,
+        auditorId,
+        reqType,
+        req.required_material_name || null,
+        req.required_material_type || null,
+        req.description
+      );
+    });
+
+    logOperation(applicationId, auditorId, '退回审核', 'return_with_requirements', 'pending_approval', 'returned',
+      `退回申请并指定材料补充要求（共${requirements.length}项）：${returnComment || ''}`);
+  });
+
+  tx();
+  return getReturnMaterialRequirements(applicationId);
+}
+
+function getReturnMaterialRequirements(applicationId) {
+  return db.prepare(`
+    SELECT rmr.*, u.real_name as auditor_name, u.username as auditor_username,
+           cu.real_name as completer_name, cu.username as completer_username,
+           am.material_name as related_material_name, am.material_type as related_material_type
+    FROM return_material_requirements rmr
+    LEFT JOIN users u ON rmr.auditor_id = u.id
+    LEFT JOIN users cu ON rmr.completed_by = cu.id
+    LEFT JOIN application_materials am ON rmr.material_id = am.id
+    WHERE rmr.application_id = ?
+    ORDER BY rmr.created_at ASC, rmr.id ASC
+  `).all(applicationId);
+}
+
+function markReturnRequirementsAsCompleted(applicationId, userId) {
+  const pendingReqs = db.prepare(`
+    SELECT * FROM return_material_requirements
+    WHERE application_id = ? AND is_completed = 0
+  `).all(applicationId);
+
+  if (pendingReqs.length === 0) return;
+
+  const tx = db.transaction(() => {
+    const updateStmt = db.prepare(`
+      UPDATE return_material_requirements
+      SET is_completed = 1, completed_at = CURRENT_TIMESTAMP, completed_by = ?
+      WHERE application_id = ? AND is_completed = 0
+    `);
+    updateStmt.run(userId, applicationId);
+  });
+
+  tx();
+}
+
+function updateMaterialStatusOnSubmit(applicationId) {
+  const stmt = db.prepare(`
+    UPDATE application_materials
+    SET status = 'submitted', updated_at = CURRENT_TIMESTAMP
+    WHERE application_id = ? AND status IN ('pending', 'supplemented', 'returned')
+  `);
+  stmt.run(applicationId);
+}
+
+function updateMaterialStatusOnReturn(applicationId) {
+  const stmt = db.prepare(`
+    UPDATE application_materials
+    SET status = 'returned', updated_at = CURRENT_TIMESTAMP
+    WHERE application_id = ? AND status = 'submitted'
+  `);
+  stmt.run(applicationId);
+}
+
+function updateMaterialStatusOnApprove(applicationId) {
+  const stmt = db.prepare(`
+    UPDATE application_materials
+    SET status = 'approved', updated_at = CURRENT_TIMESTAMP
+    WHERE application_id = ? AND status IN ('submitted', 'returned', 'supplemented', 'pending')
+  `);
+  stmt.run(applicationId);
+}
+
+function getMaterialTypeDict() {
+  return [
+    { value: 'contract', label: '合同/协议' },
+    { value: 'quote', label: '报价单/比价单' },
+    { value: 'invoice', label: '发票' },
+    { value: 'receipt', label: '收据/付款凭证' },
+    { value: 'certificate', label: '资质证书' },
+    { value: 'approval', label: '审批文件' },
+    { value: 'specification', label: '技术规格书' },
+    { value: 'drawing', label: '图纸/设计文件' },
+    { value: 'other', label: '其他' }
+  ];
+}
+
+function getMaterialStatusDict() {
+  return [
+    { value: 'pending', label: '待提交', color: 'default' },
+    { value: 'submitted', label: '已提交', color: 'primary' },
+    { value: 'returned', label: '被退回', color: 'danger' },
+    { value: 'supplemented', label: '已补充', color: 'warning' },
+    { value: 'approved', label: '已通过', color: 'success' }
+  ];
+}
+
+function getRequirementTypeDict() {
+  return [
+    { value: 'supplement', label: '补充材料' },
+    { value: 'modify', label: '修改材料' },
+    { value: 'delete', label: '删除材料' },
+    { value: 'replace', label: '替换材料' }
+  ];
+}
+
 module.exports = {
   generateApplicationNo,
   findApprovalRule,
@@ -398,5 +746,21 @@ module.exports = {
   closeApplication,
   resubmitApplication,
   confirmArrival,
-  updateQuoteDescription
+  updateQuoteDescription,
+  logMaterialChange,
+  addMaterial,
+  updateMaterial,
+  deleteMaterial,
+  getMaterialsByApplication,
+  getMaterialChangeLogs,
+  getAllMaterialChangeLogs,
+  addReturnMaterialRequirements,
+  getReturnMaterialRequirements,
+  markReturnRequirementsAsCompleted,
+  updateMaterialStatusOnSubmit,
+  updateMaterialStatusOnReturn,
+  updateMaterialStatusOnApprove,
+  getMaterialTypeDict,
+  getMaterialStatusDict,
+  getRequirementTypeDict
 };
