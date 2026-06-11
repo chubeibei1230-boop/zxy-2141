@@ -125,46 +125,41 @@ router.put('/applications/:id', (req, res) => {
       urgent_reason, supplier_id, expected_date, items, quote_description
     } = req.body;
 
-    const finalUrgency = urgency_level || app.urgency_level;
+    const finalUrgency = urgency_level !== undefined ? urgency_level : app.urgency_level;
     if (finalUrgency === 'urgent') {
-      const finalReason = urgent_reason || app.urgent_reason;
+      const finalReason = urgent_reason !== undefined ? urgent_reason : app.urgent_reason;
       if (!finalReason || finalReason.trim() === '') {
         return res.status(400).json({ success: false, message: '紧急申请必须填写紧急原因' });
       }
     }
 
-    let finalItems = app.items;
-    if (items) {
+    const updates = [];
+    const values = [];
+
+    if (title !== undefined) { updates.push('title = ?'); values.push(title); }
+    if (budget_subject_id !== undefined) { updates.push('budget_subject_id = ?'); values.push(budget_subject_id); }
+    if (total_amount !== undefined) { updates.push('total_amount = ?'); values.push(parseFloat(total_amount)); }
+    if (urgency_level !== undefined) { updates.push('urgency_level = ?'); values.push(urgency_level); }
+    if (urgent_reason !== undefined) { updates.push('urgent_reason = ?'); values.push(urgent_reason); }
+    if (supplier_id !== undefined) { updates.push('supplier_id = ?'); values.push(supplier_id); }
+    if (expected_date !== undefined) { updates.push('expected_date = ?'); values.push(expected_date); }
+    if (items !== undefined) {
       if (!Array.isArray(items) || items.length === 0) {
         return res.status(400).json({ success: false, message: '采购明细不能为空' });
       }
-      finalItems = JSON.stringify(items);
+      updates.push('items = ?');
+      values.push(JSON.stringify(items));
+    }
+    if (quote_description !== undefined) { updates.push('quote_description = ?'); values.push(quote_description); }
+
+    if (updates.length === 0) {
+      return res.status(400).json({ success: false, message: '没有需要更新的字段' });
     }
 
-    db.prepare(`
-      UPDATE purchase_applications
-      SET title = COALESCE(?, title),
-          budget_subject_id = COALESCE(?, budget_subject_id),
-          total_amount = COALESCE(?, total_amount),
-          urgency_level = COALESCE(?, urgency_level),
-          urgent_reason = ?,
-          supplier_id = ?,
-          expected_date = ?,
-          items = ?,
-          quote_description = ?,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `).run(
-      title, budget_subject_id,
-      total_amount ? parseFloat(total_amount) : null,
-      urgency_level,
-      (urgent_reason !== undefined) ? urgent_reason : null,
-      (supplier_id !== undefined) ? supplier_id : null,
-      (expected_date !== undefined) ? expected_date : null,
-      items ? finalItems : undefined,
-      (quote_description !== undefined) ? quote_description : null,
-      id
-    );
+    updates.push('updated_at = CURRENT_TIMESTAMP');
+    values.push(id);
+
+    db.prepare(`UPDATE purchase_applications SET ${updates.join(', ')} WHERE id = ?`).run(...values);
 
     logOperation(id, userId, '修改申请', 'update', app.status, app.status, '修改了采购申请内容');
 

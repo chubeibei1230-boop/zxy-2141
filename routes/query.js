@@ -241,11 +241,9 @@ router.get('/applications/:id', (req, res) => {
 router.get('/applications/:id/logs', (req, res) => {
   try {
     const logs = db.prepare(`
-      SELECT ol.*, u.real_name as user_name, u.username as user_username,
-             u2.real_name as target_user_name
+      SELECT ol.*, u.real_name as user_name, u.username as user_username
       FROM operation_logs ol
       LEFT JOIN users u ON ol.user_id = u.id
-      LEFT JOIN users u2 ON ol.target_user_id = u2.id
       WHERE ol.application_id = ?
       ORDER BY ol.created_at ASC, ol.id ASC
     `).all(req.params.id);

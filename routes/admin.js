@@ -340,7 +340,7 @@ router.post('/approval-rules', (req, res) => {
       return !u || u.role !== 'auditor';
     });
     if (invalidAuditors.length > 0) {
-      return res.status(400).json({ success: false, message: `存在无效的审核员ID：${invalidAuditors.join(', ')}` });
+      return res.status(400).json({ success: false, message: `存在无效的审核员ID，审核员只能选择auditor角色的用户：${invalidAuditors.join(', ')}` });
     }
 
     const info = db.prepare(
@@ -381,6 +381,14 @@ router.put('/approval-rules/:id', (req, res) => {
 
     if (approval_levels !== auditor_ids.length) {
       return res.status(400).json({ success: false, message: '审核员数量必须与审批级别一致' });
+    }
+
+    const invalidAuditors = auditor_ids.filter(id => {
+      const u = db.prepare('SELECT id, role FROM users WHERE id = ?').get(id);
+      return !u || u.role !== 'auditor';
+    });
+    if (invalidAuditors.length > 0) {
+      return res.status(400).json({ success: false, message: `存在无效的审核员ID，审核员只能选择auditor角色的用户：${invalidAuditors.join(', ')}` });
     }
 
     db.prepare(
