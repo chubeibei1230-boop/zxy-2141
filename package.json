@@ -1,0 +1,18 @@
+{
+  "name": "purchase-management-api",
+  "version": "1.0.0",
+  "description": "小型公司采购管理后端系统",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js",
+    "dev": "node app.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "better-sqlite3": "^11.1.2",
+    "jsonwebtoken": "^9.0.2",
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dayjs": "^1.11.10"
+  }
+}
